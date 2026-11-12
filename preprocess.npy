@@ -1,0 +1,259 @@
+import os
+import wfdb
+import numpy as np
+from scipy.signal import find_peaks
+
+DATASET_DIR = r"..\combined-measurement-of-ecg-breathing-and-seismocardiograms-1.0.0\files"
+
+record = wfdb.rdrecord(os.path.join(DATASET_DIR, 'b001'))
+print(record.fs)
+print(record.sig_name)
+print(record.p_signal.shape)
+
+ecg_signal = record.p_signal[:, 1]   # Lead II
+scg_signal = record.p_signal[:, 3]   # SCG
+
+print(ecg_signal.shape)
+print(scg_signal.shape) 
+
+## Use Power Density spectrum to find the distribution for signal
+
+import scipy.signal as signal
+import matplotlib.pyplot as plt
+if len(scg_signal.shape) > 1:
+    record = record[:, 0]
+fs = 5000
+total_sample = len(scg_signal)
+duration_second = total_sample/fs
+
+custom_nperseg = 60000
+custom_overlap = custom_nperseg//2
+
+
+frequency, psd = signal.welch(scg_signal, fs = fs, window = 'hann', nperseg = custom_nperseg, noverlap= custom_overlap)
+
+valid_range_indec = np.where((frequency >= 0.5) & (frequency <=3.0))[0]
+if len(valid_range_indec) == 0:
+    print("❌ Error: Something went wrong. No frequency bins found in the biological zone.")
+
+
+    
+valid_peak_index = np.argmax(psd[valid_range_indec])
+peak_idx_in_range = np.argmax(psd[valid_range_indec])
+actual_peak_idx = valid_range_indec[peak_idx_in_range]
+    
+detected_hz = frequency[actual_peak_idx]
+detected_bpm = detected_hz * 60
+peak_power = psd[actual_peak_idx]
+
+frequencies_bpm = frequency * 60
+
+plt.figure(figsize=(10, 5), facecolor='#f7f9fa')
+    
+    # Plot the clean, averaged power spectrum line
+plt.plot(frequencies_bpm, psd, color='#1abc9c', linewidth=2.5, label='SCG Power Spectrum')
+    
+    # Place a glowing star marker exactly on the winning peak coordinate
+plt.plot(detected_bpm, peak_power, marker='*', markersize=15, 
+            color='#e74c3c', markeredgecolor='yellow', markeredgewidth=1.5,
+            linestyle='None', label=f'Detected Heart Rate Peak ({detected_bpm:.1f} BPM)')
+
+    # Draw the biological boundary limits (30 BPM and 180 BPM walls)
+plt.axvline(x=30, color='#7f8c8d', linestyle='--', linewidth=1.2, label='30 BPM Lower Limit (0.5 Hz)')
+plt.axvline(x=180, color='#7f8c8d', linestyle='--', linewidth=1.2, label='180 BPM Upper Limit (3.0 Hz)')
+
+    # Formatting style layouts
+plt.title("Seismocardiogram (SCG) Power Spectral Density Analysis", fontsize=12, fontweight='bold', pad=15)
+plt.xlabel("Heart Rate (Beats Per Minute - BPM)", fontsize=10, fontweight='bold')
+plt.ylabel("Power Density (V²/Hz)", fontsize=10, fontweight='bold')
+    
+    # Zoom the lens window STRICTLY between 20 BPM and 200 BPM to see the human zone clearly
+plt.xlim(20, 200) 
+    
+plt.grid(True, linestyle=':', alpha=0.6, color='#b2bec3')
+plt.legend(loc='upper right', frameon=True, facecolor='white', edgecolor='#dfe6e9')
+plt.tight_layout()
+    
+    # Fire up the user window interface to show the graph on your screen
+plt.show()
+
+from scipy.signal import butter, sosfiltfilt
+
+def bandpass_filter(signal, low_freq, high_freq, fs, order = 4):
+    nyquist = fs/2
+    low_norm = low_freq/nyquist
+    high_norm = high_freq/nyquist
+    sos = butter(order, [low_norm, high_norm], btype='bandpass', output='sos')
+    return sosfiltfilt(sos, signal)
+fs = record.fs
+low_freq = 0.5
+high_freq = 3.2
+
+scg_filter = bandpass_filter(scg_signal, low_freq, high_freq, fs, order = 4)
+print(scg_filter)
+
+
+##### ECG-R Peaks find #########
+from scipy.signal import find_peaks
+
+def R_peaks(signal, fs, high_bpm, low_bpm):
+    high_hz = high_bpm / 60
+    low_hz = low_bpm / 60
+
+    min_distance_sec = 1 / high_hz
+    min_distance_samples = int(min_distance_sec * fs)
+
+    peaks, properties = find_peaks(signal, distance=min_distance_samples)
+
+    return peaks, properties
+
+peaks, properties = R_peaks(-ecg_signal, fs, high_bpm=180, low_bpm=30)
+
+print(len(peaks))
+print(peaks[:10])
+
+import matplotlib.pyplot as plt
+
+# look at a short slice, e.g. first 10 seconds
+start, end = 0, fs * 10   # 10 seconds of data
+
+plt.figure(figsize=(15, 4))
+plt.plot(ecg_signal[start:end], color='blue', linewidth=1)
+
+# only show peaks that fall within this window  
+peaks_in_window = peaks[(peaks >= start) & (peaks < end)]
+plt.plot(peaks_in_window, ecg_signal[peaks_in_window], 'rx', markersize=10)
+
+plt.title("ECG with detected R-peaks (first 10 seconds)")
+plt.xlabel("Sample index")
+plt.ylabel("Amplitude")
+plt.show()  
+
+
+################ SCG segmentation ##########
+########## millisecond to samples ##########
+pre_R = 5
+post_R = 450
+
+samp_pre_R = int(pre_R/1000*fs)
+samp_post_R = int(post_R/1000*fs)
+
+print(samp_pre_R)
+print(samp_post_R)
+one_peak = peaks[8]
+r_start = one_peak-samp_pre_R
+r_end = one_peak + samp_post_R
+beat = scg_filter[r_start : r_end]
+
+################ Cross-check: same window on ECG ##########
+time_ms = (np.arange(-samp_pre_R, samp_post_R) / fs) * 1000
+
+ecg_beat = ecg_signal[r_start : r_end]
+
+plt.figure(figsize=(10, 4))
+plt.plot(time_ms, ecg_beat, color='#D85A30', linewidth=1.5)
+plt.axvline(0, color='red', linestyle='--', linewidth=1, label='R-peak')
+
+plt.xlabel("Time relative to R-peak (ms)")
+plt.ylabel("Amplitude")
+plt.title("Same window, plotted on ECG")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+
+
+################ SCG segmentation — while loop version ##########
+scg_beats_list = []
+for i in range(len(peaks)):
+  
+  current_peak = peaks[i]
+    
+  r_start = current_peak - samp_pre_R
+  r_end = current_peak + samp_post_R
+  if r_start<0 or r_end>=len(scg_filter):
+    continue
+  beat = scg_filter[r_start : r_end]
+  scg_beats_list.append(beat)
+    
+scg_beats = np.array(scg_beats_list)
+print(scg_beats.shape)
+
+plt.Figure(figsize=(10, 4))
+plt.plot(time_ms, scg_beats_list[2], color = '#D85A30', linewidth = 1.5)
+plt.axvline(0, color = 'green', linestyle = '--', label = 'scg-beat')
+
+plt.xlabel('Time relative to R-peak (ms)')
+plt.ylabel('Amplitude')
+plt.title ("Same window, plotted on SCG")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+plt.Figure(figsize=(10, 4))
+plt.plot(time_ms, scg_beats_list[4], color = '#D85A30', linewidth = 1.5)
+plt.axvline(0, color = 'green', linestyle = '--', label = 'scg-beat')
+
+plt.xlabel('Time relative to R-peak (ms)')
+plt.ylabel('Amplitude')
+plt.title ("Same window, plotted on SCG")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+plt.Figure(figsize=(10, 4))
+plt.plot(time_ms, scg_beats_list[10], color = '#D85A30', linewidth = 1.5)
+plt.axvline(0, color = 'green', linestyle = '--', label = 'scg-beat')
+
+plt.xlabel('Time relative to R-peak (ms)')
+plt.ylabel('Amplitude')
+plt.title ("Same window, plotted on SCG")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+
+all_beats = []
+
+subject_number = 1
+while subject_number <= 20:
+
+    if subject_number < 10:
+        record_name = "b00" + str(subject_number)
+    else:
+        record_name = "b0" + str(subject_number)
+
+    print("Processing", record_name)
+
+    record = wfdb.rdrecord(os.path.join(DATASET_DIR, record_name))
+
+    ecg_signal = record.p_signal[:, 1]
+    scg_signal = record.p_signal[:, 3]
+
+    scg_filtered = bandpass_filter(scg_signal, low_freq, high_freq, fs, order=4)
+
+    peaks, properties = R_peaks(-ecg_signal, fs, high_bpm=110, low_bpm=40)
+
+    i = 0
+    while i < len(peaks):
+        current_peak = peaks[i]
+        r_start = current_peak - samp_pre_R
+        r_end = current_peak + samp_post_R
+
+        if r_start < 0 or r_end >= len(scg_filtered):
+            i = i + 1
+            continue
+
+        beat = scg_filtered[r_start : r_end]
+        all_beats.append(beat)
+
+        i = i + 1
+
+    print("Total beats so far:", len(all_beats))
+
+    subject_number = subject_number + 1
+
+scg_beats = np.array(all_beats)
+print("Final shape:", scg_beats.shape)
+
+np.save('scg_beats.npy', scg_beats)
+print("Saved scg_beats.npy")
